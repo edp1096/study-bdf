@@ -5,7 +5,6 @@ import (
 	"math"
 )
 
-// 회로 파라미터
 const (
 	R     = 100.0   // 저항 (Ω)
 	L     = 1e-3    // 인덕턴스 (H)
@@ -14,11 +13,10 @@ const (
 )
 
 type bdfMethod struct {
-	coefficients []float64 // BDF 계수
-	beta         float64   // f(y^(n+1)) 계수
+	coefficients []float64
+	beta         float64
 }
 
-// BDF 차수별 계수
 var bdfMethods = []bdfMethod{
 	{[]float64{1.0}, 1.0},                                                                                                // 1차
 	{[]float64{4.0 / 3.0, -1.0 / 3.0}, 2.0 / 3.0},                                                                        // 2차
@@ -28,79 +26,87 @@ var bdfMethods = []bdfMethod{
 	{[]float64{360.0 / 147.0, -450.0 / 147.0, 400.0 / 147.0, -225.0 / 147.0, 72.0 / 147.0, -10.0 / 147.0}, 60.0 / 147.0}, // 6차
 }
 
-// 입력 전압 함수 (사인파)
 func V_in(t float64) float64 {
-	return 5 * math.Sin(2*math.Pi*1000*t) // 1kHz, 5V 입력 전압
+	return 5 * math.Sin(2*math.Pi*1000*t)
 }
 
-// RL 회로 미분방정식
+// 미분방정식
 func dI(t, I float64) float64 {
 	return (V_in(t) - R*I) / L
 }
 
-// RK4 초기값 준비 메서드 (개선된 버전)
 func rk4Step(t, I, dt float64) float64 {
 	k1 := dI(t, I)
 	k2 := dI(t+dt/2, I+dt*k1/2)
 	k3 := dI(t+dt/2, I+dt*k2/2)
 	k4 := dI(t+dt, I+dt*k3)
-
 	return I + dt*(k1+2*k2+2*k3+k4)/6
 }
 
-// 개선된 외삽법 (안정성 강화)
-func extrapolate(values []float64, n, order int) float64 {
+// Newton's divided differences를 이용한 외삽법
+func extrapolate(I []float64, n, order int) float64 {
 	if n < order-1 {
-		return values[n]
+		return I[n]
 	}
 
-	// 가중치 기반 외삽
-	pred := values[n]
-	weight := 1.0
-	factorial := 1.0
+	diffs := make([][]float64, order)
+	diffs[0] = make([]float64, order)
+	for i := 0; i < order; i++ {
+		diffs[0][i] = I[n-i]
+	}
 
+	for i := 1; i < order; i++ {
+		diffs[i] = make([]float64, order-i)
+		for j := 0; j < order-i; j++ {
+			diffs[i][j] = diffs[i-1][j] - diffs[i-1][j+1]
+		}
+	}
+
+	factorial := 1.0
+	pred := I[n]
 	for i := 1; i < order; i++ {
 		factorial *= float64(i)
-		diff := values[n] - values[n-i]
-		pred += diff / (factorial * math.Pow(float64(i), 1.5))
-		weight += 1.0 / (factorial * math.Pow(float64(i), 1.5))
+		pred += diffs[i][0] / factorial
 	}
-
-	return pred / weight
+	return pred
 }
 
-// BDF 방법으로 RL 회로 해석 (개선된 버전)
-func solveBDF(order int) ([]float64, []float64, []float64, []float64) {
-	N := int(math.Floor(tstop/dt)) + 1
-	t := make([]float64, N+1)
-	I := make([]float64, N+1)
-	V_L := make([]float64, N+1)
-	V_in_arr := make([]float64, N+1)
+func solveBDF(targetOrder int) ([]float64, []float64, []float64) {
+	steps := int(math.Floor(tstop/dt)) + 1
+	t := make([]float64, steps)
+	I := make([]float64, steps)
+	V_L := make([]float64, steps)
 
-	// 시간 배열 초기화
-	for n := 0; n <= N; n++ {
+	for n := 0; n < steps; n++ {
 		t[n] = float64(n) * dt
-		V_in_arr[n] = V_in(t[n])
 	}
 
-	// 초기값 설정 개선
-	I[0] = 0 // 명시적 초기 전류 0 설정
+	// 초기값 - Trapezoidal
+	I[1] = I[0] + (dt/(2*L))*(V_in(t[0])+V_in(t[1])-R*I[0])
+	V_L[1] = L * (I[1] - I[0]) / dt
 
-	// RK4로 초기값 준비 (각 차수에 맞게 조정)
-	for i := 1; i < order; i++ {
-		I[i] = rk4Step(t[i-1], I[i-1], dt)
-	}
+	// // 초기값 - RK4
+	// for i := 1; i < targetOrder; i++ {
+	// 	I[i] = rk4Step(t[i-1], I[i-1], dt)
+	// 	V_L[i] = L * (I[i] - I[i-1]) / dt
+	// }
 
-	method := bdfMethods[order-1]
+	// BDF 메인 루프
+	for n := 1; n < steps-1; n++ {
+		currentOrder := targetOrder
+		if n < targetOrder-1 {
+			currentOrder = n + 1
+		}
 
-	// BDF 방법 적용 (수렴성 및 안정성 강화)
-	for n := order - 1; n < N; n++ {
-		// 초기 추정값 (개선된 외삽법)
-		I_pred := extrapolate(I, n, order)
+		method := bdfMethods[currentOrder-1]
 
-		maxIter := 200
-		tolerance := 1e-14
-		dampingFactor := 1.0
+		// Predictor - 외삽법으로 초기값 예측
+		I_pred := extrapolate(I, n, currentOrder)
+
+		// Corrector - BDF + 뉴턴-랩슨
+		maxIter := 50
+		tolerance := 1e-10
+		// v_next := V_in(t[n+1])
 
 		for iter := 0; iter < maxIter; iter++ {
 			// 이전 값들의 선형 조합
@@ -109,32 +115,23 @@ func solveBDF(order int) ([]float64, []float64, []float64, []float64) {
 				sum += method.coefficients[i] * I[n-i]
 			}
 
-			// 현재 시점 미분값
 			fn := dI(t[n+1], I_pred)
 			rightSide := sum + dt*method.beta*fn
-
-			F := I_pred - rightSide // 개선된 잔차 계산
-			// dF := 1.0 + dt*method.beta*R/L*(1.0+math.Abs(I_pred)/100.0) // 동적 자코비안 근사
+			F := I_pred - rightSide
 			dF := 1.0 + dt*method.beta*R/L
-			delta := -F / dF * dampingFactor // 뉴턴-랩슨 스텝
-			I_new := I_pred + delta          // 전류값 갱신
+			delta := -F / dF
+			I_new := I_pred + delta
 
-			// 수렴 및 안정성 확인
+			// 수렴 확인
 			if math.Abs(delta) < tolerance {
 				I_pred = I_new
 				break
 			}
 
 			// 발산 체크 및 방지
-			if iter > maxIter/2 {
-				dampingFactor *= 0.5
-			}
-
-			maxTheoretical := 5.0 / R                // 5V 입력 전압 기준
-			maxAllowedCurrent := maxTheoretical * 10 // 여유 계수 10 적용
+			maxAllowedCurrent := 5.0 / R * 10 // 이론적 최대전류의 10배
 			if math.IsNaN(I_new) || math.Abs(I_new) > maxAllowedCurrent {
-				fmt.Printf("경고: 전류 발산 감지 - 현재값: %.6f A, 허용 최대값: %.6f A\n", math.Abs(I_new), maxAllowedCurrent)
-				I_pred = I[n]
+				I_pred = I[n] // 이전 값으로 복귀
 				break
 			}
 
@@ -142,12 +139,11 @@ func solveBDF(order int) ([]float64, []float64, []float64, []float64) {
 		}
 
 		I[n+1] = I_pred
-
-		// 인덕터 전압 계산
+		// 전압은 단순 차분으로 계산
 		V_L[n+1] = L * (I[n+1] - I[n]) / dt
 	}
 
-	return t, I, V_L, V_in_arr
+	return t, I, V_L
 }
 
 func main() {
@@ -157,16 +153,13 @@ func main() {
 	fmt.Printf("시간 간격: %.4f s\n", dt)
 	fmt.Printf("총 시뮬레이션 시간: %.4f s\n\n", tstop)
 
-	// 이론적 최대 인덕터 전압 계산
 	maxDI := 2 * math.Pi * 1000 * 5 / R
 	theoreticalMaxVL := L * maxDI
 
-	// 각 BDF 차수별 결과 분석
 	for order := 1; order <= 6; order++ {
 		fmt.Printf("Gear%d:\n", order)
-		t, I, V_L, V_in_arr := solveBDF(order)
+		t, I, V_L := solveBDF(order)
 
-		// 최대 인덕터 전압 계산
 		maxVL := 0.0
 		for _, vl := range V_L {
 			if math.Abs(vl) > math.Abs(maxVL) {
@@ -181,11 +174,11 @@ func main() {
 		fmt.Printf("최대 인덕터 전압 이론치: %.6f V\n", theoreticalMaxVL)
 		fmt.Printf("err: %.6f%%\n\n", relError)
 
-		printStep := max(len(t)/20, 1)
-		fmt.Println(" 시간(s)   입력전압(V)   전류(A)   인덕터전압(V)")
+		printStep := int(math.Max(float64(len(t)/20), 1))
+		fmt.Println(" 시간(s)   입력전압(V)   전류(A)   V_L(V)")
 		fmt.Println("----------------------------------------------")
 		for n := 0; n < len(t); n += printStep {
-			fmt.Printf("%8.4f  %8.4f  %10.6f  %10.6f\n", t[n], V_in_arr[n], I[n], V_L[n])
+			fmt.Printf("%8.4f  %8.4f  %10.6f  %7.3f\n", t[n], V_in(t[n]), I[n], V_L[n])
 		}
 		fmt.Println()
 	}
