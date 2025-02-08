@@ -9,7 +9,7 @@ import (
 const (
 	R     = 100.0   // 저항 (Ω)
 	L     = 1e-3    // 인덕턴스 (H)
-	dt    = 0.00005 // 타임스텝 (s)
+	dt    = 0.00001 // 타임스텝 (s)
 	tstop = 0.002   // 시뮬레이션 종료 시간 (s)
 )
 
@@ -113,10 +113,11 @@ func solveBDF(order int) ([]float64, []float64, []float64, []float64) {
 			fn := dI(t[n+1], I_pred)
 			rightSide := sum + dt*method.beta*fn
 
-			F := I_pred - rightSide                                     // 개선된 잔차 계산
-			dF := 1.0 + dt*method.beta*R/L*(1.0+math.Abs(I_pred)/100.0) // 동적 자코비안 근사
-			delta := -F / dF * dampingFactor                            // 뉴턴-랩슨 스텝
-			I_new := I_pred + delta                                     // 전류값 갱신
+			F := I_pred - rightSide // 개선된 잔차 계산
+			// dF := 1.0 + dt*method.beta*R/L*(1.0+math.Abs(I_pred)/100.0) // 동적 자코비안 근사
+			dF := 1.0 + dt*method.beta*R/L
+			delta := -F / dF * dampingFactor // 뉴턴-랩슨 스텝
+			I_new := I_pred + delta          // 전류값 갱신
 
 			// 수렴 및 안정성 확인
 			if math.Abs(delta) < tolerance {
