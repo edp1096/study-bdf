@@ -9,7 +9,7 @@ import (
 const (
 	R     = 100.0   // 저항 (Ω)
 	L     = 1e-3    // 인덕턴스 (H)
-	dt    = 0.00002 // 타임스텝 (s)
+	dt    = 0.00005 // 타임스텝 (s)
 	tstop = 0.002   // 시뮬레이션 종료 시간 (s)
 )
 
@@ -129,7 +129,10 @@ func solveBDF(order int) ([]float64, []float64, []float64, []float64) {
 				dampingFactor *= 0.5
 			}
 
-			if math.IsNaN(I_new) || math.Abs(I_new) > 1000 {
+			maxTheoretical := 5.0 / R                // 5V 입력 전압 기준
+			maxAllowedCurrent := maxTheoretical * 10 // 여유 계수 10 적용
+			if math.IsNaN(I_new) || math.Abs(I_new) > maxAllowedCurrent {
+				fmt.Printf("경고: 전류 발산 감지 - 현재값: %.6f A, 허용 최대값: %.6f A\n", math.Abs(I_new), maxAllowedCurrent)
 				I_pred = I[n]
 				break
 			}
