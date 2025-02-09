@@ -5,13 +5,18 @@ import (
 	"math"
 )
 
+// 회로 파라미터
 const (
-	R     = 100.0   // 저항 (Ω)
-	L     = 1e-3    // 인덕턴스 (H)
-	dt    = 0.00001 // 타임스텝 (s)
-	tstop = 0.002   // 시뮬레이션 종료 시간 (s)
+	R = 100.0 // 저항 (Ω)
+	L = 1e-3  // 인덕턴스 (H)
+	// dt    = 1e-6   // 타임스텝 (s)
+	dt    = 1e-5   // 타임스텝 (s)
+	tstop = 0.002  // 종료 시간 (s)
+	Vpeak = 5.0    // 전압 피크 (V)
+	freq  = 1000.0 // 주파수 (Hz)
 )
 
+// BDF 계수 구조체
 type bdfMethod struct {
 	coefficients []float64
 	beta         float64
@@ -26,159 +31,142 @@ var bdfMethods = []bdfMethod{
 	{[]float64{360.0 / 147.0, -450.0 / 147.0, 400.0 / 147.0, -225.0 / 147.0, 72.0 / 147.0, -10.0 / 147.0}, 60.0 / 147.0}, // 6차
 }
 
-func V_in(t float64) float64 {
-	return 5 * math.Sin(2*math.Pi*1000*t)
+// 전압원
+func Vin(t float64) float64 {
+	return Vpeak * math.Sin(2.0*math.Pi*freq*t)
 }
 
-// 미분방정식
-func dI(t, I float64) float64 {
-	return (V_in(t) - R*I) / L
+// 저항 전류 계산
+func calcResistorCurrent(v float64) float64 {
+	return v / R
 }
 
-func rk4Step(t, I, dt float64) float64 {
-	k1 := dI(t, I)
-	k2 := dI(t+dt/2, I+dt*k1/2)
-	k3 := dI(t+dt/2, I+dt*k2/2)
-	k4 := dI(t+dt, I+dt*k3)
-	return I + dt*(k1+2*k2+2*k3+k4)/6
+// 인덕터 전압 계산
+func calcInductorVoltage(di, dt float64) float64 {
+	return L * di / dt
 }
 
-// Newton's divided differences를 이용한 외삽법
-func extrapolate(I []float64, n, order int) float64 {
-	if n < order-1 {
-		return I[n]
-	}
-
-	diffs := make([][]float64, order)
-	diffs[0] = make([]float64, order)
-	for i := 0; i < order; i++ {
-		diffs[0][i] = I[n-i]
-	}
-
-	for i := 1; i < order; i++ {
-		diffs[i] = make([]float64, order-i)
-		for j := 0; j < order-i; j++ {
-			diffs[i][j] = diffs[i-1][j] - diffs[i-1][j+1]
-		}
-	}
-
-	factorial := 1.0
-	pred := I[n]
-	for i := 1; i < order; i++ {
-		factorial *= float64(i)
-		pred += diffs[i][0] / factorial
-	}
-	return pred
+// Trapezoidal 적분을 사용한 초기 전류 계산
+func calcInitialCurrent(v0, v1, i0 float64, dt float64) float64 {
+	// v = L*di/dt + Ri 방정식에서
+	// i1 = i0 + (dt/2L)*(v0 + v1 - R*(i0 + i1))
+	// => i1 = (i0 + (dt/2L)*(v0 + v1 - R*i0))/(1 + R*dt/2L)
+	return (i0 + (dt/(2*L))*(v0+v1-R*i0)) / (1 + R*dt/(2*L))
 }
 
-func solveBDF(targetOrder int) ([]float64, []float64, []float64) {
-	steps := int(math.Floor(tstop/dt)) + 1
-	t := make([]float64, steps)
-	I := make([]float64, steps)
-	V_L := make([]float64, steps)
+// 상태 벡터 구조체
+type State struct {
+	t     float64 // 시간
+	v     float64 // 전압
+	i     float64 // 전류
+	di_dt float64 // 전류 변화율
+}
 
-	for n := 0; n < steps; n++ {
-		t[n] = float64(n) * dt
+func newState(t float64) State {
+	return State{t: t}
+}
+
+func solveBDF(order int) []State {
+	steps := int(tstop/dt) + 1
+	states := make([]State, steps)
+
+	// DC 동작점 계산
+	states[0] = newState(0)
+	states[0].v = Vin(0)
+	states[0].i = calcResistorCurrent(states[0].v)
+	states[0].di_dt = 0
+
+	// Trapezoidal로 첫 2스텝 계산
+	for n := 0; n < 2; n++ {
+		states[n+1] = newState(float64(n+1) * dt)
+		states[n+1].v = Vin(states[n+1].t)
+		states[n+1].i = calcInitialCurrent(
+			states[n].v,
+			states[n+1].v,
+			states[n].i,
+			dt,
+		)
+		states[n+1].di_dt = (states[n+1].i - states[n].i) / dt
 	}
-
-	// 초기값 - Trapezoidal
-	I[1] = I[0] + (dt/(2*L))*(V_in(t[0])+V_in(t[1])-R*I[0])
-	V_L[1] = L * (I[1] - I[0]) / dt
-
-	// // 초기값 - RK4
-	// for i := 1; i < targetOrder; i++ {
-	// 	I[i] = rk4Step(t[i-1], I[i-1], dt)
-	// 	V_L[i] = L * (I[i] - I[i-1]) / dt
-	// }
 
 	// BDF 메인 루프
-	for n := 1; n < steps-1; n++ {
-		currentOrder := targetOrder
-		if n < targetOrder-1 {
-			currentOrder = n + 1
-		}
+	history := make([]float64, 6) // 이전 전류값 저장용
 
+	for n := 2; n < steps-1; n++ {
+		states[n+1] = newState(float64(n+1) * dt)
+		states[n+1].v = Vin(states[n+1].t)
+
+		// 현재 BDF 차수 결정
+		currentOrder := order
+		if n < order {
+			currentOrder = n
+		}
 		method := bdfMethods[currentOrder-1]
 
-		// Predictor - 외삽법으로 초기값 예측
-		I_pred := extrapolate(I, n, currentOrder)
-
-		// Corrector - BDF + 뉴턴-랩슨
-		maxIter := 50
-		tolerance := 1e-10
-		// v_next := V_in(t[n+1])
-
-		for iter := 0; iter < maxIter; iter++ {
-			// 이전 값들의 선형 조합
-			sum := 0.0
-			for i := 0; i < len(method.coefficients); i++ {
-				sum += method.coefficients[i] * I[n-i]
-			}
-
-			fn := dI(t[n+1], I_pred)
-			rightSide := sum + dt*method.beta*fn
-			F := I_pred - rightSide
-			dF := 1.0 + dt*method.beta*R/L
-			delta := -F / dF
-			I_new := I_pred + delta
-
-			// 수렴 확인
-			if math.Abs(delta) < tolerance {
-				I_pred = I_new
-				break
-			}
-
-			// 발산 체크 및 방지
-			maxAllowedCurrent := 5.0 / R * 10 // 이론적 최대전류의 10배
-			if math.IsNaN(I_new) || math.Abs(I_new) > maxAllowedCurrent {
-				I_pred = I[n] // 이전 값으로 복귀
-				break
-			}
-
-			I_pred = I_new
+		// 이전 전류값 수집
+		for i := 0; i < currentOrder; i++ {
+			history[i] = states[n-i].i
 		}
 
-		I[n+1] = I_pred
-		// 전압은 단순 차분으로 계산
-		V_L[n+1] = L * (I[n+1] - I[n]) / dt
+		// BDF로 새로운 전류값 계산
+		// Σ(α[k]*i[n-k]) + β*dt/L*(v[n+1] - R*i[n+1]) = i[n+1]
+		sum := 0.0
+		for i := 0; i < len(method.coefficients); i++ {
+			sum += method.coefficients[i] * history[i]
+		}
+
+		// i[n+1] = (sum + β*dt*v[n+1]/L)/(1 + β*dt*R/L)
+		states[n+1].i = (sum + method.beta*dt*states[n+1].v/L) /
+			(1 + method.beta*dt*R/L)
+
+		// 전류 변화율과 인덕터 전압 계산
+		states[n+1].di_dt = (states[n+1].i - states[n].i) / dt
+
+		// LTE 계산 및 안정성 검사는 여기서 추가 가능
 	}
 
-	return t, I, V_L
+	return states
 }
 
 func main() {
-	fmt.Println("RL 회로 BDF 수치해석")
-	fmt.Printf("저항: %.2f Ω\n", R)
-	fmt.Printf("인덕턴스: %.3f H\n", L)
-	fmt.Printf("시간 간격: %.4f s\n", dt)
-	fmt.Printf("총 시뮬레이션 시간: %.4f s\n\n", tstop)
+	fmt.Println("RL 회로 수치해석 (BDF/Gear Method)")
+	fmt.Printf("R = %.1f Ω\n", R)
+	fmt.Printf("L = %.3f H\n", L)
+	fmt.Printf("Timestep = %.6f s\n", dt)
+	fmt.Printf("End time = %.3f s\n\n", tstop)
 
-	maxDI := 2 * math.Pi * 1000 * 5 / R
-	theoreticalMaxVL := L * maxDI
+	// 이론적 최대값 계산
+	maxDi_dt := Vpeak * 2 * math.Pi * freq / math.Sqrt(R*R+(2*math.Pi*freq*L)*(2*math.Pi*freq*L))
+	theoreticalMaxVL := L * maxDi_dt
+	fmt.Printf("이론적 최대 인덕터 전압 = %.6f V\n\n", theoreticalMaxVL)
 
 	for order := 1; order <= 6; order++ {
 		fmt.Printf("Gear%d:\n", order)
-		t, I, V_L := solveBDF(order)
 
+		states := solveBDF(order)
+
+		// 결과 분석
 		maxVL := 0.0
-		for _, vl := range V_L {
-			if math.Abs(vl) > math.Abs(maxVL) {
-				maxVL = vl
+		for i := 1; i < len(states); i++ {
+			vL := L * states[i].di_dt
+			if math.Abs(vL) > math.Abs(maxVL) {
+				maxVL = vL
 			}
 		}
 
-		errRate := math.Abs(maxVL) - math.Abs(theoreticalMaxVL)
-		relError := errRate / math.Abs(theoreticalMaxVL) * 100.0
-
 		fmt.Printf("최대 인덕터 전압: %.6f V\n", maxVL)
-		fmt.Printf("최대 인덕터 전압 이론치: %.6f V\n", theoreticalMaxVL)
-		fmt.Printf("err: %.6f%%\n\n", relError)
+		fmt.Printf("오차율: %.6f%%\n\n", (math.Abs(maxVL)-theoreticalMaxVL)/theoreticalMaxVL*100)
 
-		printStep := int(math.Max(float64(len(t)/20), 1))
-		fmt.Println(" 시간(s)   입력전압(V)   전류(A)   V_L(V)")
-		fmt.Println("----------------------------------------------")
-		for n := 0; n < len(t); n += printStep {
-			fmt.Printf("%8.4f  %8.4f  %10.6f  %7.3f\n", t[n], V_in(t[n]), I[n], V_L[n])
+		// 결과 출력
+		fmt.Println("   시간(s)    전압(V)    전류(A)    di/dt(A/s)    vL(V)")
+		fmt.Println("---------------------------------------------------------")
+
+		printStep := int(math.Max(float64(len(states)/20), 1))
+		for i := 0; i < len(states); i += printStep {
+			s := states[i]
+			vL := L * s.di_dt
+			fmt.Printf("%10.6f %10.6f %10.6f %10.2f %10.6f\n",
+				s.t, s.v, s.i, s.di_dt, vL)
 		}
 		fmt.Println()
 	}
